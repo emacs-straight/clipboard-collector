@@ -4,7 +4,7 @@
 
 ;; Author: Clemens Radermacher <clemera@posteo.net>
 ;; URL: https://github.com/clemera/clipboard-collector
-;; Version: 0.2
+;; Version: 0.3
 ;; Package-Requires: ((emacs "25"))
 ;; Keywords: convenience
 
@@ -63,18 +63,21 @@
 
 Uses the following list format:
 
-    (MATCH-REGEX [TRANSFORM-FORMAT-STRING] [TRANSFORM-CLIPBOARD-FUNC])
+    (MATCH-REGEX [TRANSFORM-FORMAT-STRING] [TRANSFORM-CLIPBOARD])
 
 MATCH-REGEX is the triggering regex, if clipboard contents match
 this regex the clipboard entry will be collected.
 
 Optional TRANSFORM-FORMAT-STRING should be a format string where
-the placeholder is replaced by the clipboard contents.
+the '%s' placeholder is replaced by the clipboard contents.
 
-If you want to transform the clipboard contents using a function
-specify TRANSFORM-CLIPBOARD-FUNC. This is applied before contents
-are applied to TRANSFORM-FORMAT-STRING and can use match-data of
-the matched regex.")
+Additionally the matched candidated can be transformed by
+specifying TRANSFORM-CLIPBOARD. If it's a function it gets called
+with the matched candidated and its return value will be applied
+to TRANSFORM-FORMAT-STRING. The function can use match-data of
+MATCH-REGEX. In case TRANSFORM-CLIPBOARD is a number the match
+string of that number will be applied to
+TRANSFORM-FORMAT-STRING.")
 
 (defvar clipboard-collector--finish-function
   #'clipboard-collector-finish-default
@@ -145,18 +148,21 @@ is active."
 
 Returns cons of matching regex of used rule and clipboard
 contents transformed according to matched rule."
-  (cl-dolist (rules (or rules clipboard-collector--rules))
-    (when (string-match (car rules) clip)
-      (let ((main (cond ((functionp (car (cddr rules)))
-                         (funcall (car (cddr rules)) clip))
-                        (t clip)))
-            (format (cond ((functionp (cadr rules))
-                           (funcall (cadr rules) (match-string 1 clip)))
-                          ((stringp (cadr rules))
-                           (cadr rules))
-                          (t "%s"))))
-        (cl-return (cons (car rules)
-                         (format format main)))))))
+  (cl-dolist (rule (or rules clipboard-collector--rules))
+    (when (string-match (car rule) clip)
+      (let* ((converter (car (cddr rule)))
+             (transformed (cond ((functionp converter)
+                                 (funcall converter clip))
+                                ((numberp converter)
+                                 (match-string converter clip))
+                                (t clip)))
+             (format (cond ((functionp (cadr rule))
+                            (funcall (cadr rule) (match-string 1 clip)))
+                           ((stringp (cadr rule))
+                            (cadr rule))
+                           (t "%s"))))
+        (cl-return (cons (car rule)
+                         (format format transformed)))))))
 
 
 (defun clipboard-collector--try-collect-last-kill ()
@@ -189,10 +195,6 @@ Called with collected item.")
   "Collect ITEM.
 
 ITEM is added to `clipboard-collector--items'."
-  ;; replace if new match for same rule
-  (cl-delete item clipboard-collector--items
-             :test (lambda (i1 i2)
-                     (string= (car i1) (car i2))))
   (push item clipboard-collector--items)
   (funcall clipboard-collector-display-function (cdr item)))
 
@@ -216,6 +218,17 @@ Uses `clipboard-collector--finish-function' ."
       (insert (pop items)
               (if items "\n" "")))))
 
+(defun clipboard-collect-region (beg end)
+  "Collect entries for current region lines."
+  (interactive "r")
+  (dolist (line (split-string
+                 (buffer-substring beg end) "\n"
+                 :omit-nulls))
+    (let ((inhibit-message t))
+      (clipboard-collector--try-collect line)))
+  (deactivate-mark)
+  (message "Collected items in region; Continue or finish with C-c C-c"))
+
 ;;;###autoload
 (defmacro clipboard-collector-create (name rules &optional finishf)
   "Create clipboard collector command named NAME.
@@ -229,7 +242,7 @@ The command will enable `clipboard-collector-mode' which will
 bind `clipboard-collector-finish' to finish collecting items
 using FINISHF which defaults to
 `clipboard-collector-finish-default'."
-  `(defun ,name ()
+  `(defun ,name (arg)
      ,(format "Start timer to collect clipboard items according
 to the following rules (see `clipboard-collector--rules'):
 
@@ -240,13 +253,19 @@ This command enables `clipboard-collector-mode' which binds
 
 `%s'
 
-on the collected items. "
+on the collected items.
+
+When called with prefix argument try to collect the lines of
+current region."
               (pp rules) (pp finishf))
-     (interactive)
+     (interactive "P")
      (clipboard-collector-mode 1)
+     ;; override defaults
      (setq clipboard-collector--finish-function
            (or ',finishf #'clipboard-collector-finish-default))
-     (setq clipboard-collector--rules ',rules)))
+     (setq clipboard-collector--rules ',rules)
+     (when (use-region-p))
+     (clipboard-collect-region (region-beginning) (region-end))))
 
 
 (provide 'clipboard-collector)
